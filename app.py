@@ -3,6 +3,7 @@ import pickle
 import numpy as np
 from flask import Flask, request, jsonify, render_template
 from PIL import Image
+import tensorflow
 
 try:
     from tensorflow.keras.models import load_model
