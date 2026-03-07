@@ -1,0 +1,167 @@
+import os
+import pickle
+import numpy as np
+from flask import Flask, request, jsonify, render_template
+from PIL import Image
+
+try:
+    from tensorflow.keras.models import load_model
+    from tensorflow.keras.layers import DepthwiseConv2D as BaseDepthwiseConv2D
+except Exception:
+    from keras.models import load_model
+    from keras.layers import DepthwiseConv2D as BaseDepthwiseConv2D
+
+app = Flask(__name__)
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.join(BASE_DIR, "skin-cancer-7-classes_MobileNet_ph2_model.keras")
+SEX_ENCODER_PATH = os.path.join(BASE_DIR, "skin-cancer-7-classes_sex_encoder.pkl")
+LOC_ENCODER_PATH = os.path.join(BASE_DIR, "skin-cancer-7-classes_loc_encoder.pkl")
+AGE_SCALER_PATH = os.path.join(BASE_DIR, "skin-cancer-7-classes_age_scaler.pkl")
+
+CLASSES = ["bkl", "nv", "df", "mel", "vasc", "bcc", "akiec"]
+
+CLASSES_FULL = {
+    "bkl": "Benign Keratosis",
+    "nv": "Melanocytic Nevi",
+    "df": "Dermatofibroma",
+    "mel": "Melanoma",
+    "vasc": "Vascular Lesion",
+    "bcc": "Basal Cell Carcinoma",
+    "akiec": "Actinic Keratoses / Bowen's Disease",
+}
+
+DANGEROUS_CLASSES = ["mel", "akiec"]
+
+
+class CompatDepthwiseConv2D(BaseDepthwiseConv2D):
+    def __init__(self, *args, **kwargs):
+        kwargs.pop("groups", None)
+        super().__init__(*args, **kwargs)
+
+
+print("[INFO] Loading model and preprocessors...")
+model = None
+sex_encoder = None
+loc_encoder = None
+age_scaler = None
+
+try:
+    model = load_model(
+        MODEL_PATH,
+        custom_objects={"DepthwiseConv2D": CompatDepthwiseConv2D},
+        compile=False,
+    )
+    with open(SEX_ENCODER_PATH, "rb") as f:
+        sex_encoder = pickle.load(f)
+    with open(LOC_ENCODER_PATH, "rb") as f:
+        loc_encoder = pickle.load(f)
+    with open(AGE_SCALER_PATH, "rb") as f:
+        age_scaler = pickle.load(f)
+    print("[INFO] Model and preprocessors loaded successfully!")
+    print(f"[INFO] Sex classes: {sex_encoder.classes_}")
+    print(f"[INFO] Localization classes: {loc_encoder.classes_}")
+except Exception as e:
+    print(f"[ERROR] Could not load model or preprocessors: {e}")
+
+
+def encode_tabular(age, sex, localization):
+    num_sex_classes = len(sex_encoder.classes_)
+    num_loc_classes = len(loc_encoder.classes_)
+
+    age_scaled = age_scaler.transform(np.array([[float(age)]]))[0]
+
+    sex_ohe = np.zeros(num_sex_classes)
+    if sex in sex_encoder.classes_:
+        sex_ohe[sex_encoder.transform([sex])[0]] = 1.0
+    else:
+        sex_ohe[sex_encoder.transform(["unknown"])[0]] = 1.0
+
+    loc_ohe = np.zeros(num_loc_classes)
+    if localization in loc_encoder.classes_:
+        loc_ohe[loc_encoder.transform([localization])[0]] = 1.0
+    else:
+        loc_ohe[loc_encoder.transform(["unknown"])[0]] = 1.0
+
+    return np.concatenate([age_scaled, sex_ohe, loc_ohe])
+
+
+def preprocess_image(image_file):
+    img = Image.open(image_file).convert("RGB")
+    img = img.resize((224, 224))
+    img_array = np.array(img, dtype=np.float32)
+    img_array = np.expand_dims(img_array, axis=0)
+    return img_array
+
+
+@app.route("/")
+def home():
+    sex_options = (
+        list(sex_encoder.classes_) if sex_encoder else ["male", "female", "unknown"]
+    )
+    loc_options = list(loc_encoder.classes_) if loc_encoder else []
+    return render_template(
+        "index.html", sex_options=sex_options, loc_options=loc_options
+    )
+
+
+@app.route("/predict", methods=["POST"])
+def predict():
+    if model is None:
+        return jsonify({"error": "Model is not loaded."}), 500
+
+    if "file" not in request.files:
+        return jsonify({"error": "No image uploaded"}), 400
+
+    file = request.files["file"]
+    if file.filename == "":
+        return jsonify({"error": "No file selected"}), 400
+
+    age = request.form.get("age", "").strip()
+    sex = request.form.get("sex", "unknown").strip()
+    localization = request.form.get("localization", "unknown").strip()
+
+    if not age:
+        return jsonify({"error": "Age is required"}), 400
+
+    try:
+        age = float(age)
+        if age < 0 or age > 120:
+            return jsonify({"error": "Please enter a valid age (0-120)"}), 400
+    except ValueError:
+        return jsonify({"error": "Age must be a number"}), 400
+
+    try:
+        img_array = preprocess_image(file)
+        tab_array = encode_tabular(age, sex, localization)
+        tab_array = np.expand_dims(tab_array, axis=0)
+
+        predictions = model.predict([img_array, tab_array], verbose=0)[0]
+
+        top_index = int(np.argmax(predictions))
+        predicted_class = CLASSES[top_index]
+        confidence = float(predictions[top_index] * 100)
+        is_dangerous = predicted_class in DANGEROUS_CLASSES
+
+        all_probs = {
+            CLASSES[i]: float(predictions[i] * 100) for i in range(len(CLASSES))
+        }
+
+        return jsonify(
+            {
+                "predicted_class": predicted_class,
+                "predicted_class_full": CLASSES_FULL.get(
+                    predicted_class, predicted_class
+                ),
+                "confidence": round(confidence, 2),
+                "is_dangerous": is_dangerous,
+                "all_probabilities": all_probs,
+                "class_names_full": CLASSES_FULL,
+            }
+        )
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+if __name__ == "__main__":
+    app.run(debug=True, port=5000)
