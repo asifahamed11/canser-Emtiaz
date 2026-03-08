@@ -15,7 +15,11 @@ except Exception:
 app = Flask(__name__)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MODEL_PATH = os.path.join(BASE_DIR, "skin-cancer-7-classes_MobileNet_ph2_model.keras")
+MODEL_CANDIDATES = [
+    os.path.join(BASE_DIR, "skin-cancer-7-classes_MobileNet_ph2_model.keras"),
+    os.path.join(BASE_DIR, "skin-cancer-7-classes_MobileNet_ph1_model.keras"),
+    os.path.join(BASE_DIR, "MobileNet.h5"),
+]
 SEX_ENCODER_PATH = os.path.join(BASE_DIR, "skin-cancer-7-classes_sex_encoder.pkl")
 LOC_ENCODER_PATH = os.path.join(BASE_DIR, "skin-cancer-7-classes_loc_encoder.pkl")
 AGE_SCALER_PATH = os.path.join(BASE_DIR, "skin-cancer-7-classes_age_scaler.pkl")
@@ -46,27 +50,56 @@ model = None
 sex_encoder = None
 loc_encoder = None
 age_scaler = None
+model_path_used = None
+model_expects_tabular = False
 
-try:
-    model = load_model(
-        MODEL_PATH,
-        custom_objects={"DepthwiseConv2D": CompatDepthwiseConv2D},
-        compile=False,
-    )
-    with open(SEX_ENCODER_PATH, "rb") as f:
-        sex_encoder = pickle.load(f)
-    with open(LOC_ENCODER_PATH, "rb") as f:
-        loc_encoder = pickle.load(f)
-    with open(AGE_SCALER_PATH, "rb") as f:
-        age_scaler = pickle.load(f)
-    print("[INFO] Model and preprocessors loaded successfully!")
-    print(f"[INFO] Sex classes: {sex_encoder.classes_}")
-    print(f"[INFO] Localization classes: {loc_encoder.classes_}")
-except Exception as e:
-    print(f"[ERROR] Could not load model or preprocessors: {e}")
+model_load_errors = []
+for candidate in MODEL_CANDIDATES:
+    if not os.path.exists(candidate):
+        continue
+
+    try:
+        model = load_model(
+            candidate,
+            custom_objects={"DepthwiseConv2D": CompatDepthwiseConv2D},
+            compile=False,
+        )
+        model_path_used = candidate
+        break
+    except Exception as e:
+        model_load_errors.append(f"{os.path.basename(candidate)}: {e}")
+
+if model is None:
+    print("[ERROR] Could not load any model candidate.")
+    if model_load_errors:
+        print("[ERROR] Model load attempts:")
+        for err in model_load_errors:
+            print(f"  - {err}")
+else:
+    model_expects_tabular = len(model.inputs) > 1
+    print(f"[INFO] Model loaded from: {model_path_used}")
+    print(f"[INFO] Model input count: {len(model.inputs)}")
+
+    try:
+        with open(SEX_ENCODER_PATH, "rb") as f:
+            sex_encoder = pickle.load(f)
+        with open(LOC_ENCODER_PATH, "rb") as f:
+            loc_encoder = pickle.load(f)
+        with open(AGE_SCALER_PATH, "rb") as f:
+            age_scaler = pickle.load(f)
+        print("[INFO] Preprocessors loaded successfully!")
+        print(f"[INFO] Sex classes: {sex_encoder.classes_}")
+        print(f"[INFO] Localization classes: {loc_encoder.classes_}")
+    except Exception as e:
+        print(f"[WARN] Model loaded but preprocessors unavailable: {e}")
 
 
 def encode_tabular(age, sex, localization):
+    if sex_encoder is None or loc_encoder is None or age_scaler is None:
+        raise RuntimeError(
+            "Tabular preprocessors are not loaded; cannot run multi-input inference."
+        )
+
     num_sex_classes = len(sex_encoder.classes_)
     num_loc_classes = len(loc_encoder.classes_)
 
@@ -134,10 +167,13 @@ def predict():
 
     try:
         img_array = preprocess_image(file)
-        tab_array = encode_tabular(age, sex, localization)
-        tab_array = np.expand_dims(tab_array, axis=0)
 
-        predictions = model.predict([img_array, tab_array], verbose=0)[0]
+        if model_expects_tabular:
+            tab_array = encode_tabular(age, sex, localization)
+            tab_array = np.expand_dims(tab_array, axis=0)
+            predictions = model.predict([img_array, tab_array], verbose=0)[0]
+        else:
+            predictions = model.predict(img_array, verbose=0)[0]
 
         top_index = int(np.argmax(predictions))
         predicted_class = CLASSES[top_index]
