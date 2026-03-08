@@ -20,6 +20,8 @@ MODEL_CANDIDATES = [
     os.path.join(BASE_DIR, "skin-cancer-7-classes_MobileNet_ph1_model.keras"),
     os.path.join(BASE_DIR, "MobileNet.h5"),
 ]
+GATEKEEPER_MODEL_PATH = os.path.join(BASE_DIR, "gatekeeper_model.keras")
+GATEKEEPER_SKIN_THRESHOLD = 0.50
 SEX_ENCODER_PATH = os.path.join(BASE_DIR, "skin-cancer-7-classes_sex_encoder.pkl")
 LOC_ENCODER_PATH = os.path.join(BASE_DIR, "skin-cancer-7-classes_loc_encoder.pkl")
 AGE_SCALER_PATH = os.path.join(BASE_DIR, "skin-cancer-7-classes_age_scaler.pkl")
@@ -47,6 +49,7 @@ class CompatDepthwiseConv2D(BaseDepthwiseConv2D):
 
 print("[INFO] Loading model and preprocessors...")
 model = None
+gatekeeper_model = None
 sex_encoder = None
 loc_encoder = None
 age_scaler = None
@@ -94,6 +97,78 @@ else:
         print(f"[WARN] Model loaded but preprocessors unavailable: {e}")
 
 
+def _load_gatekeeper(path):
+    """
+    Load gatekeeper_model.keras which was saved with an early Keras 3 that stored:
+      - config.json  using old module path keras.src.engine.functional
+      - model.weights.h5  using Keras-3 class-type positional keys (e.g. conv2d/vars/0)
+
+    Strategy:
+      1. Build the tf_keras model using from_config (handles TFOpLambda & old config).
+      2. Walk the layer tree in creation order; resolve each layer's H5 key by
+         class-name counter (BatchNormalization → batch_normalization, Conv2D → conv2d …).
+      3. Assign weights values directly – bypasses the naming-format mismatch.
+    """
+    import zipfile, json, re, tempfile, shutil, h5py
+    import tf_keras as _tf_keras
+
+    def _cls_to_h5key(name):
+        return re.sub(r"([a-z])([A-Z])", r"\1_\2", name).lower()
+
+    def _assign_recursive(layer_list, h5file, prefix):
+        counters = {}
+        for layer in layer_list:
+            cls_key = _cls_to_h5key(type(layer).__name__)
+            sub_layers = getattr(layer, "layers", None)
+            is_container = (
+                isinstance(layer, (_tf_keras.Sequential, _tf_keras.Model))
+                and sub_layers
+            )
+            if is_container:
+                if not any(getattr(l, "variables", None) for l in sub_layers):
+                    continue  # e.g. augmentation Sequential (no weights)
+                cnt = counters.get(cls_key, 0)
+                sub_prefix = f"{prefix}/{cls_key}" + (f"_{cnt}" if cnt > 0 else "")
+                counters[cls_key] = cnt + 1
+                _assign_recursive(sub_layers, h5file, sub_prefix + "/layers")
+            elif layer.variables:
+                cnt = counters.get(cls_key, 0)
+                layer_prefix = f"{prefix}/{cls_key}" + (f"_{cnt}" if cnt > 0 else "")
+                counters[cls_key] = cnt + 1
+                for i, v in enumerate(layer.variables):
+                    h5_key = f"{layer_prefix}/vars/{i}"
+                    if h5_key in h5file:
+                        v.assign(h5file[h5_key][()])
+
+    tmpdir = tempfile.mkdtemp()
+    try:
+        # Extract config + weights from the .keras ZIP
+        with zipfile.ZipFile(path, "r") as zf:
+            cfg_raw = zf.read("config.json").decode("utf-8")
+            zf.extract("model.weights.h5", tmpdir)
+
+        cfg = json.loads(cfg_raw)
+        model = _tf_keras.Model.from_config(cfg["config"])
+
+        h5_path = os.path.join(tmpdir, "model.weights.h5")
+        with h5py.File(h5_path, "r") as h5f:
+            _assign_recursive(model.layers, h5f, "layers")
+
+        return model
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+if os.path.exists(GATEKEEPER_MODEL_PATH):
+    try:
+        gatekeeper_model = _load_gatekeeper(GATEKEEPER_MODEL_PATH)
+        print(f"[INFO] Gatekeeper model loaded from: {GATEKEEPER_MODEL_PATH}")
+    except Exception as e:
+        print(f"[WARN] Could not load gatekeeper model: {e}")
+else:
+    print("[WARN] Gatekeeper model not found. Continuing without gatekeeper filter.")
+
+
 def encode_tabular(age, sex, localization):
     if sex_encoder is None or loc_encoder is None or age_scaler is None:
         raise RuntimeError(
@@ -126,6 +201,15 @@ def preprocess_image(image_file):
     img_array = np.array(img, dtype=np.float32)
     img_array = np.expand_dims(img_array, axis=0)
     return img_array
+
+
+def predict_skin_probability(img_array):
+    if gatekeeper_model is None:
+        return None
+
+    pred = gatekeeper_model.predict(img_array, verbose=0)
+    skin_prob = float(np.squeeze(pred))
+    return float(np.clip(skin_prob, 0.0, 1.0))
 
 
 @app.route("/")
@@ -168,6 +252,25 @@ def predict():
     try:
         img_array = preprocess_image(file)
 
+        skin_prob = predict_skin_probability(img_array)
+        if skin_prob is not None and skin_prob < GATEKEEPER_SKIN_THRESHOLD:
+            return jsonify(
+                {
+                    "predicted_class": "not_skin",
+                    "predicted_class_full": "Not a skin lesion image",
+                    "confidence": round((1.0 - skin_prob) * 100, 2),
+                    "is_dangerous": False,
+                    "all_probabilities": {k: 0.0 for k in CLASSES},
+                    "class_names_full": CLASSES_FULL,
+                    "gatekeeper": {
+                        "enabled": True,
+                        "passed": False,
+                        "skin_probability": round(skin_prob * 100, 2),
+                        "threshold": round(GATEKEEPER_SKIN_THRESHOLD * 100, 2),
+                    },
+                }
+            )
+
         if model_expects_tabular:
             tab_array = encode_tabular(age, sex, localization)
             tab_array = np.expand_dims(tab_array, axis=0)
@@ -194,6 +297,14 @@ def predict():
                 "is_dangerous": is_dangerous,
                 "all_probabilities": all_probs,
                 "class_names_full": CLASSES_FULL,
+                "gatekeeper": {
+                    "enabled": gatekeeper_model is not None,
+                    "passed": True if skin_prob is not None else None,
+                    "skin_probability": (
+                        round(skin_prob * 100, 2) if skin_prob is not None else None
+                    ),
+                    "threshold": round(GATEKEEPER_SKIN_THRESHOLD * 100, 2),
+                },
             }
         )
     except Exception as e:
