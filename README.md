@@ -1,6 +1,6 @@
 # SkinCancer AI 🔬
 
-[![CI](https://github.com/your-username/skincancer-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/your-username/skincancer-ai/actions/workflows/ci.yml)
+[![CI](https://github.com/asifahamed11/canser-Emtiaz/actions/workflows/ci.yml/badge.svg)](https://github.com/asifahamed11/canser-Emtiaz/actions/workflows/ci.yml)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
 [![TensorFlow 2.20](https://img.shields.io/badge/TensorFlow-2.20-orange.svg)](https://www.tensorflow.org/)
 [![Flask](https://img.shields.io/badge/Flask-3.x-green.svg)](https://flask.palletsprojects.com/)
@@ -60,6 +60,9 @@ skincancer-ai/
 ├── skin-cancer-7-classes_sex_encoder.pkl # LabelEncoder for sex feature
 ├── skin-cancer-7-classes_loc_encoder.pkl # LabelEncoder for localization feature
 ├── skin-cancer-7-classes_age_scaler.pkl  # StandardScaler for age feature
+├── tests/
+│   ├── __init__.py
+│   └── test_routes.py                    # pytest route tests (CI)
 ├── requirements.txt
 ├── Dockerfile
 ├── .github/
@@ -75,8 +78,8 @@ skincancer-ai/
 ### 1 — Clone & install
 
 ```bash
-git clone https://github.com/your-username/skincancer-ai.git
-cd skincancer-ai
+git clone https://github.com/asifahamed11/canser-Emtiaz.git
+cd canser-Emtiaz
 
 python -m venv .venv
 # Windows:
