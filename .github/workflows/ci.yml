@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install --no-cache-dir -r requirements.txt
+
+      - name: Lint with flake8
+        run: |
+          pip install flake8
+          # stop the build if there are Python syntax errors or undefined names
+          flake8 app.py --count --select=E9,F63,F7,F82 --show-source --statistics
+          # warn on style issues but don't fail
+          flake8 app.py --count --max-line-length=120 --statistics --exit-zero
+
+      - name: Run import smoke test
+        run: |
+          python - <<'EOF'
+          import importlib, sys
+          for pkg in ["flask", "numpy", "PIL", "sklearn", "h5py"]:
+              try:
+                  importlib.import_module(pkg)
+                  print(f"  OK  {pkg}")
+              except ImportError as e:
+                  print(f"  FAIL {pkg}: {e}", file=sys.stderr)
+                  sys.exit(1)
+          print("All core imports OK")
+          EOF
+
+      - name: Health-check Flask app (no model files)
+        run: |
+          pip install pytest
+          python - <<'EOF'
+          import os, sys
+          os.environ["TESTING"] = "1"
+          # Patch load_model so no real models are needed in CI
+          import unittest.mock as mock
+          import importlib
+
+          dummy_model = mock.MagicMock()
+          dummy_model.inputs = [mock.MagicMock()]
+          with mock.patch("tensorflow.keras.models.load_model", return_value=dummy_model), \
+               mock.patch("builtins.open", mock.mock_open(read_data=b"")), \
+               mock.patch("pickle.load", return_value=mock.MagicMock(classes_=["male","female","unknown"])):
+              import app as flask_app
+              client = flask_app.app.test_client()
+
+              # /health should always return 200
+              resp = client.get("/health")
+              assert resp.status_code == 200, f"Expected 200, got {resp.status_code}"
+              data = resp.get_json()
+              assert "status" in data
+              print("  OK  /health")
+
+              # /api/classes should return 200
+              resp2 = client.get("/api/classes")
+              assert resp2.status_code == 200, f"Expected 200, got {resp2.status_code}"
+              data2 = resp2.get_json()
+              assert "classes" in data2
+              print("  OK  /api/classes")
+
+              # / should return 200
+              resp3 = client.get("/")
+              assert resp3.status_code == 200, f"Expected 200, got {resp3.status_code}"
+              print("  OK  /")
+
+          print("All route checks passed")
+          EOF

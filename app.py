@@ -311,5 +311,62 @@ def predict():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/health")
+def health():
+    """Health check endpoint for monitoring and CI."""
+    return jsonify(
+        {
+            "status": "ok",
+            "model_loaded": model is not None,
+            "model_file": (
+                os.path.basename(model_path_used) if model_path_used else None
+            ),
+            "gatekeeper_loaded": gatekeeper_model is not None,
+            "preprocessors_loaded": all(
+                x is not None for x in [sex_encoder, loc_encoder, age_scaler]
+            ),
+            "model_expects_tabular": model_expects_tabular,
+        }
+    )
+
+
+@app.route("/api/classes")
+def api_classes():
+    """Return available lesion classes and metadata."""
+    sex_options = (
+        list(sex_encoder.classes_) if sex_encoder else ["male", "female", "unknown"]
+    )
+    loc_options = (
+        list(loc_encoder.classes_)
+        if loc_encoder
+        else [
+            "abdomen",
+            "acral",
+            "back",
+            "chest",
+            "ear",
+            "face",
+            "foot",
+            "genital",
+            "hand",
+            "lower extremity",
+            "neck",
+            "scalp",
+            "trunk",
+            "upper extremity",
+            "unknown",
+        ]
+    )
+    return jsonify(
+        {
+            "classes": CLASSES,
+            "classes_full": CLASSES_FULL,
+            "dangerous_classes": DANGEROUS_CLASSES,
+            "sex_options": sex_options,
+            "localization_options": loc_options,
+        }
+    )
+
+
 if __name__ == "__main__":
     app.run(debug=True, port=5000)

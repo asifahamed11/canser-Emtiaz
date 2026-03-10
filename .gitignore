@@ -1,16 +1,42 @@
 # Python cache files
 __pycache__/
 *.py[cod]
+*$py.class
 
 # Virtual environments
 .venv/
 venv/
 env/
+ENV/
 
-# Environment files
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Environment / secrets
 .env
+.env.*
+!.env.example
 
 # OS/editor files
 .DS_Store
 Thumbs.db
 .vscode/
+.idea/
+*.swp
+*.swo
+
+# Model weight files (large binaries – store via Git LFS or external storage)
+# Note: existing tracked model files are intentionally committed for demo purposes.
+# For a production fork, use Git LFS: git lfs track "*.keras" "*.h5" "*.pkl"
+*.h5
+*.keras
+*.pkl
+
+# Docker
+.dockerignore
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
